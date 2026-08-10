@@ -90,7 +90,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.phase = Phase::Calibrating;
 
     let mut missing_counts: BTreeMap<String, usize> = BTreeMap::new();
-
     state.phase = Phase::Running;
 
     // let old = sample::sample(&state.config, &state.capabilities);
@@ -168,24 +167,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match recovery {
                     RecoveryState::Normal => {}
-                    RecoveryState::Recovery { .. } => {
-                        for drive in &new.drives {
-                            if let Some(latency) = drive.write_latency_ms {
-                                if latency <= 100.0 {
-                                    launch::cont(&child)?;
-                                    recovery = RecoveryState::Normal;
+                    RecoveryState::Recovery { deadline } => {
+                        if std::time::Instant::now() >= deadline {
+                            recovery = RecoveryState::Probing {
+                                deadline: std::time::Instant::now()
+                                    + std::time::Duration::from_secs(5),
+                            };
 
-                                    println!(
-                                        "Recovery latency reached: {:.0} ms/write. JR resumed.",
-                                        latency
-                                    );
+                            println!("Recovery timeout. Entering probing state.");
+                        } else {
+                            for drive in &new.drives {
+                                if let Some(latency) = drive.write_latency_ms {
+                                    if latency <= 100.0 {
+                                        launch::cont(&child)?;
 
-                                    break;
+                                        // rsync child: SIGCONT sent.
+                                        recovery = RecoveryState::Normal;
+
+                                        println!("rsync child resumed.");
+
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
-
                     RecoveryState::Probing { .. } => {
                         println!("Probing");
                     }
