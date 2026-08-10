@@ -10,6 +10,7 @@ mod probe;
 mod state;
 mod types;
 
+use crate::state::RecoveryState;
 use crate::phase::Phase;
 use crate::state::State;
 use crate::types::{Capabilities, Configuration, DriveCapability, DriveId, Observation, SampleLog};
@@ -17,12 +18,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::thread;
 use std::time::Duration;
-#[derive(Debug, Clone, Copy)]
-enum RecoveryState {
-    Normal,
-    Recovery { deadline: std::time::Instant },
-    Probing { deadline: std::time::Instant },
-} // Main control loop.
+
+  // Main control loop.
   //
   // Startup:
   //   - Initialize configuration and capabilities.

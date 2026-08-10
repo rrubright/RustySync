@@ -1,5 +1,13 @@
 use crate::phase::Phase;
 use crate::types::{Capabilities, Configuration, Decision};
+use std::time::Instant;
+
+#[derive(Debug, Clone, Copy)]
+pub enum RecoveryState {
+    Normal,
+    Recovery { deadline: Instant },
+    Probing { deadline: Instant },
+}
 
 #[derive(Debug)]
 pub struct State {
