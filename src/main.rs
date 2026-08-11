@@ -10,8 +10,8 @@ mod probe;
 mod state;
 mod types;
 
-use crate::state::RecoveryState;
 use crate::phase::Phase;
+use crate::state::RecoveryState;
 use crate::state::State;
 use crate::types::{Capabilities, Configuration, DriveCapability, DriveId, Observation, SampleLog};
 use std::collections::BTreeMap;
@@ -19,24 +19,24 @@ use std::fs;
 use std::thread;
 use std::time::Duration;
 
-  // Main control loop.
-  //
-  // Startup:
-  //   - Initialize configuration and capabilities.
-  //   - Collect calibration observations.
-  //   - Establish baseline measurements.
-  //
-  // Runtime loop:
-  //   - Acquire a new Observation.
-  //   - Compute derived metrics (latency, transfer velocity, etc.).
-  //   - Evaluate system state.
-  //   - Apply decisions to rsync.
-  //   - Log observations and decisions.
-  //
-  // Observe reports facts.
-  // Algs derives meaning.
-  // State decides.
-  // Rsync executes.
+// Main control loop.
+//
+// Startup:
+//   - Initialize configuration and capabilities.
+//   - Collect calibration observations.
+//   - Establish baseline measurements.
+//
+// Runtime loop:
+//   - Acquire a new Observation.
+//   - Compute derived metrics (latency, transfer velocity, etc.).
+//   - Evaluate system state.
+//   - Apply decisions to rsync.
+//   - Log observations and decisions.
+//
+// Observe reports facts.
+// Algs derives meaning.
+// State decides.
+// Rsync executes.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("LoadLevel Rust {}", init::LOADLEVEL_VERSION);
