@@ -29,6 +29,10 @@ impl RunningAverage {
 
         self.sum / self.window.len() as f64
     }
+    pub fn clear(&mut self) {
+        self.window.clear();
+        self.sum = 0.0;
+    }
 }
 /// Compute average write latency in milliseconds per completed write.
 
