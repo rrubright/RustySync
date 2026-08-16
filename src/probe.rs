@@ -6,13 +6,6 @@ use crate::types::{DiskStats, DriveId, DriveSample};
 pub fn probe(device: &DriveId) -> Result<DriveSample, Box<dyn std::error::Error>> {
     let disk_stats = read_disk_stats(&device.name)?;
 
-    let temperature_c = match nvme::temperature_millicelsius(&device.name) {
-        Ok(milli_c) => Some(f64::from(milli_c) / 1000.0),
-        Err(error) => {
-            eprintln!("TEMP  {} unavailable: {}", device.name, error);
-            None
-        }
-    };
     let (temperature_millicelsius, temperature_c) =
         match nvme::temperature_millicelsius(&device.name) {
             Ok(milli_c) => (Some(milli_c), Some(f64::from(milli_c) / 1000.0)),

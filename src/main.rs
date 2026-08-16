@@ -11,10 +11,8 @@ mod state;
 mod types;
 
 use crate::phase::Phase;
-use crate::state::RecoveryState;
-use crate::state::State;
+use crate::state::{RecoveryAction, RecoveryState, State};
 use crate::types::{Capabilities, Configuration, DriveCapability, DriveId, Observation, SampleLog};
-use std::collections::BTreeMap;
 use std::fs;
 use std::thread;
 use std::time::Duration;
@@ -68,7 +66,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut recovery = RecoveryState::Normal;
-
     let mut sample_log = SampleLog::new(state.config.calibration_samples);
     for _ in 0..128 {
         sample_log.push(Observation::new());
@@ -86,7 +83,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     state.phase = Phase::Calibrating;
 
-    let mut missing_counts: BTreeMap<String, usize> = BTreeMap::new();
     state.phase = Phase::Running;
 
     // let old = sample::sample(&state.config, &state.capabilities);
@@ -164,32 +160,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match recovery {
                     RecoveryState::Normal => {}
-                    RecoveryState::Recovery { deadline } => {
-                        if std::time::Instant::now() >= deadline {
-                            recovery = RecoveryState::Probing {
-                                deadline: std::time::Instant::now()
-                                    + std::time::Duration::from_secs(5),
-                            };
 
-                            println!("Recovery timeout. Entering probing state.");
-                        } else {
-                            for drive in &new.drives {
-                                if let Some(latency) = drive.write_latency_ms {
-                                    if latency <= 100.0 {
-                                        launch::cont(&child)?;
+                    RecoveryState::Recovery { .. } => {
+                        match recovery.tick() {
+                            RecoveryAction::Resume => {
+                                launch::cont(&child)?;
+                                println!("Recovery complete. Entering probing state.");
+                            }
 
-                                        // rsync child: SIGCONT sent.
-                                        recovery = RecoveryState::Normal;
+                            RecoveryAction::None => {}
 
-                                        println!("rsync child resumed.");
-
-                                        break;
-                                    }
-                                }
+                            action => {
+                                println!("Unexpected recovery action: {:?}", action);
                             }
                         }
                     }
-                    RecoveryState::Probing { .. } => {
+
+                    RecoveryState::Probing => {
                         println!("Probing");
                     }
                 }
@@ -218,10 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     latency
                                 );
 
-                                recovery = RecoveryState::Recovery {
-                                    deadline: std::time::Instant::now()
-                                        + std::time::Duration::from_secs(30),
-                                };
+                                recovery = RecoveryState::Recovery { ticks: 0 };
 
                                 break;
                             }

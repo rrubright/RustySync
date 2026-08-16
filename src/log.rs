@@ -33,10 +33,3 @@ pub fn append_observation(
 
     Ok(())
 }
-
-// Temporary compatibility wrapper.
-// Keeps the existing startup scaffold building until
-// main.rs is converted to use append_observation().
-pub fn log() -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
