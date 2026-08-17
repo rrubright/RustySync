@@ -6,7 +6,7 @@ use crate::types::{DiskStats, DriveId, DriveSample};
 pub fn probe(device: &DriveId) -> Result<DriveSample, Box<dyn std::error::Error>> {
     let disk_stats = read_disk_stats(&device.name)?;
     let (temperature_millicelsius, temperature_c) =
-        temperature_pair(nvme::temperature_millicelsius(&device.name), &device.name);   
+        temperature_pair(nvme::temperature_millicelsius(&device.name), &device.name);
     Ok(DriveSample {
         id: device.clone(),
         temperature_millicelsius,
@@ -16,10 +16,7 @@ pub fn probe(device: &DriveId) -> Result<DriveSample, Box<dyn std::error::Error>
         bytes_written: None,
     })
 }
-fn temperature_pair(
-    result: Result<i32, String>,
-    device: &str,
-) -> (Option<i32>, Option<f64>) {
+fn temperature_pair(result: Result<i32, String>, device: &str) -> (Option<i32>, Option<f64>) {
     match result {
         Ok(milli_c) => (Some(milli_c), Some(f64::from(milli_c) / 1000.0)),
         Err(error) => {
@@ -33,10 +30,7 @@ fn read_disk_stats(device: &str) -> Result<DiskStats, Box<dyn std::error::Error>
     parse_disk_stats(&contents, device)
 }
 
-fn parse_disk_stats(
-    contents: &str,
-    device: &str,
-) -> Result<DiskStats, Box<dyn std::error::Error>> {
+fn parse_disk_stats(contents: &str, device: &str) -> Result<DiskStats, Box<dyn std::error::Error>> {
     let line = contents
         .lines()
         .find(|line| line.split_whitespace().nth(2) == Some(device))
@@ -62,8 +56,7 @@ mod tests {
     use super::*;
     #[test]
     fn preserves_write_counter_positions() {
-        let contents =
-            "259 0 nvme0n1 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26\n";
+        let contents = "259 0 nvme0n1 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26\n";
 
         let stats = parse_disk_stats(contents, "nvme0n1").unwrap();
 
@@ -81,8 +74,7 @@ mod tests {
     }
     #[test]
     fn parses_matching_device_stats() {
-        let contents =
-            "259 0 nvme0n1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n";
+        let contents = "259 0 nvme0n1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n";
 
         let stats = parse_disk_stats(contents, "nvme0n1").unwrap();
 
@@ -93,8 +85,7 @@ mod tests {
 
     #[test]
     fn missing_device_returns_error() {
-        let contents =
-            "259 0 nvme0n1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n";
+        let contents = "259 0 nvme0n1 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n";
 
         let result = parse_disk_stats(contents, "nvme9n9");
 

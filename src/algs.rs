@@ -177,6 +177,7 @@ mod tests {
             id: DriveId {
                 name: name.to_string(),
             },
+
             temperature_millicelsius: None,
             temperature_c: None,
             disk_stats: Some(DiskStats { fields }),
@@ -192,4 +193,33 @@ mod tests {
 
         assert_eq!(drive_bytes_written(&old, &new), Some(4096));
     }
+
+    fn sample_with_write_stats(
+    name: &str,
+    writes_completed: u64,
+    write_time_ms: u64,
+) -> DriveSample {
+    let mut fields = vec![0; 8];
+    fields[4] = writes_completed;
+    fields[7] = write_time_ms;
+
+    DriveSample {
+        id: DriveId {
+            name: name.to_string(),
+        },
+        temperature_millicelsius: None,
+        temperature_c: None,
+        disk_stats: Some(DiskStats { fields }),
+        write_latency_ms: None,
+        bytes_written: None,
+    }
+}
+
+#[test]
+fn calculates_write_latency_from_deltas() {
+    let old = sample_with_write_stats("nvme0n1", 100, 500);
+    let new = sample_with_write_stats("nvme0n1", 104, 520);
+
+    assert_eq!(drive_latency_ms(&old, &new), Some(5.0));
+}
 }

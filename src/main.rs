@@ -162,20 +162,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match recovery {
                     RecoveryState::Normal => {}
 
-                    RecoveryState::Recovery { .. } => {
-                        match recovery.tick() {
-                            RecoveryAction::Resume => {
-                                launch::cont(&child)?;
-                                println!("Recovery complete. Entering probing state.");
-                            }
-
-                            RecoveryAction::None => {}
-
-                            action => {
-                                println!("Unexpected recovery action: {:?}", action);
-                            }
+                    RecoveryState::Recovery { .. } => match recovery.tick() {
+                        RecoveryAction::Resume => {
+                            launch::cont(&child)?;
+                            println!("Recovery complete. Entering probing state.");
                         }
-                    }
+
+                        RecoveryAction::None => {}
+
+                        action => {
+                            println!("Unexpected recovery action: {:?}", action);
+                        }
+                    },
 
                     RecoveryState::Probing => {
                         println!("Probing");
