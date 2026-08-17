@@ -164,3 +164,32 @@ pub fn rsync_velocity_mb_s(old: &Observation, new: &Observation) -> Option<f64> 
 
     Some((new_bytes - old_bytes) as f64 / elapsed / 1_000_000.0)
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{DiskStats, DriveId, DriveSample};
+
+    fn sample_with_sectors(name: &str, sectors_written: u64) -> DriveSample {
+        let mut fields = vec![0; 8];
+        fields[6] = sectors_written;
+
+        DriveSample {
+            id: DriveId {
+                name: name.to_string(),
+            },
+            temperature_millicelsius: None,
+            temperature_c: None,
+            disk_stats: Some(DiskStats { fields }),
+            write_latency_ms: None,
+            bytes_written: None,
+        }
+    }
+
+    #[test]
+    fn calculates_bytes_written_from_sector_delta() {
+        let old = sample_with_sectors("nvme0n1", 100);
+        let new = sample_with_sectors("nvme0n1", 108);
+
+        assert_eq!(drive_bytes_written(&old, &new), Some(4096));
+    }
+}
