@@ -5,16 +5,8 @@ use crate::types::{DiskStats, DriveId, DriveSample};
 
 pub fn probe(device: &DriveId) -> Result<DriveSample, Box<dyn std::error::Error>> {
     let disk_stats = read_disk_stats(&device.name)?;
-
     let (temperature_millicelsius, temperature_c) =
-        match nvme::temperature_millicelsius(&device.name) {
-            Ok(milli_c) => (Some(milli_c), Some(f64::from(milli_c) / 1000.0)),
-            Err(error) => {
-                eprintln!("TEMP  {} unavailable: {}", device.name, error);
-                (None, None)
-            }
-        };
-
+        temperature_pair(nvme::temperature_millicelsius(&device.name), &device.name);   
     Ok(DriveSample {
         id: device.clone(),
         temperature_millicelsius,
@@ -24,7 +16,18 @@ pub fn probe(device: &DriveId) -> Result<DriveSample, Box<dyn std::error::Error>
         bytes_written: None,
     })
 }
-
+fn temperature_pair(
+    result: Result<i32, String>,
+    device: &str,
+) -> (Option<i32>, Option<f64>) {
+    match result {
+        Ok(milli_c) => (Some(milli_c), Some(f64::from(milli_c) / 1000.0)),
+        Err(error) => {
+            eprintln!("TEMP  {} unavailable: {}", device, error);
+            (None, None)
+        }
+    }
+}
 fn read_disk_stats(device: &str) -> Result<DiskStats, Box<dyn std::error::Error>> {
     let contents = fs::read_to_string("/proc/diskstats")?;
     parse_disk_stats(&contents, device)
@@ -50,7 +53,17 @@ fn parse_disk_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_write_counter_positions() {
+        let contents =
+            "259 0 nvme0n1 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26\n";
 
+        let stats = parse_disk_stats(contents, "nvme0n1").unwrap();
+
+        assert_eq!(stats.fields[4], 14); // writes completed
+        assert_eq!(stats.fields[6], 16); // sectors written
+        assert_eq!(stats.fields[7], 17); // write time ms
+    }
     #[test]
     fn parses_matching_device_stats() {
         let contents =
