@@ -20,7 +20,8 @@ pub fn observe(_config: &Configuration, capabilities: &Capabilities) -> Observat
 
                 observation.add_drive(sample);
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!("PROBE {} failed: {}", drive.id.name, error);
                 observation.missing(MissingData::WriteCounters(drive.id.clone()));
             }
         }
