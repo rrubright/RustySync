@@ -11,7 +11,7 @@ mod state;
 mod types;
 
 use crate::phase::Phase;
-use crate::state::{RecoveryAction, RecoveryState, State};
+use crate::state::{ActionRequest, RecoveryAction, RecoveryState, State};
 use crate::types::{Capabilities, Configuration, DriveCapability, DriveId, Observation, SampleLog};
 use std::fs;
 use std::thread;
@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         capabilities: Capabilities { drives },
         calibrated: false,
         last_decision: None,
+        action_request: ActionRequest::Continue,
     };
 
     let mut recovery = RecoveryState::Normal;

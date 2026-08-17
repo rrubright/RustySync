@@ -1,6 +1,5 @@
 use crate::phase::Phase;
 use crate::types::{Capabilities, Configuration, Decision};
-
 #[derive(Debug, Clone, Copy)]
 pub enum RecoveryState {
     Normal,
@@ -31,14 +30,22 @@ impl RecoveryState {
         }
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionRequest {
+    Continue,
+    Pause,
+    Interrupt,
+    Halt,
+}
+
 #[derive(Debug)]
 pub struct State {
     pub phase: Phase,
     pub config: Configuration,
     pub capabilities: Capabilities,
-
     pub calibrated: bool,
     pub last_decision: Option<Decision>,
+    pub action_request: ActionRequest,
 }
 
 impl State {
@@ -49,6 +56,7 @@ impl State {
             capabilities,
             calibrated: false,
             last_decision: None,
+            action_request: ActionRequest::Continue,
         }
     }
 
