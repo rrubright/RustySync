@@ -47,7 +47,14 @@ fn parse_disk_stats(
         .skip(3)
         .map(str::parse)
         .collect::<Result<Vec<u64>, _>>()?;
-
+    if fields.len() <= 7 {
+        return Err(format!(
+            "incomplete /proc/diskstats entry for {}: {} fields",
+            device,
+            fields.len()
+        )
+        .into());
+    }
     Ok(DiskStats { fields })
 }
 #[cfg(test)]
@@ -63,6 +70,14 @@ mod tests {
         assert_eq!(stats.fields[4], 14); // writes completed
         assert_eq!(stats.fields[6], 16); // sectors written
         assert_eq!(stats.fields[7], 17); // write time ms
+    }
+    #[test]
+    fn rejects_incomplete_disk_stats() {
+        let contents = "259 0 nvme0n1 1 2 3 4 5 6 7\n";
+
+        let result = parse_disk_stats(contents, "nvme0n1");
+
+        assert!(result.is_err());
     }
     #[test]
     fn parses_matching_device_stats() {
