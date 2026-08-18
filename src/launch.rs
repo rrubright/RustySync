@@ -2,14 +2,14 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 const PROGRESS_PATH: &str = "/tmp/loadlevel-rsync-bytes";
-
+const RSYNC_PATH: &str = "/home/richard/rsync-3.4.4/rsync";
 pub fn progress_bytes() -> Option<u64> {
     let text = fs::read_to_string(PROGRESS_PATH).ok()?;
     text.trim().parse::<u64>().ok()
 }
 
 pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
-    let mut child = Command::new("rsync")
+        let mut child = Command::new(RSYNC_PATH)
         .args(args)
         .stdout(Stdio::piped())
         .spawn()?;
@@ -39,7 +39,32 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
     }
     Ok(child)
 }
+pub fn poke_bwlimit(
+    child: &Child,
+    kb_per_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let command = format!("set variable bwlimit = {}", kb_per_sec);
 
+    let status = Command::new("sudo")
+        .args([
+            "gdb",
+            "-q",
+            "-batch",
+            "-p",
+            &child.id().to_string(),
+            "-ex",
+            &command,
+            "-ex",
+            "detach",
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("gdb bwlimit poke failed with {}", status).into());
+    }
+
+    Ok(())
+}
 pub fn stop(child: &Child) -> std::io::Result<()> {
     use nix::sys::signal::{kill, Signal::SIGSTOP};
     use nix::unistd::Pid;
