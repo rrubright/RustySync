@@ -46,11 +46,12 @@ pub fn write_latency_ms(old: &DiskStats, new: &DiskStats) -> Option<f64> {
     let new_writes = *new.fields.get(4)?;
     let new_time_ms = *new.fields.get(7)?;
 
+    /*
     println!(
         "DEBUG old: writes={} time={}  new: writes={} time={}",
         old_writes, old_time_ms, new_writes, new_time_ms
     );
-
+    */
     let writes_delta = new_writes.checked_sub(old_writes)?;
     let time_delta = new_time_ms.checked_sub(old_time_ms)?;
 
@@ -58,10 +59,12 @@ pub fn write_latency_ms(old: &DiskStats, new: &DiskStats) -> Option<f64> {
         return None;
     }
 
+    /*
     println!(
         "DEBUG writes_delta={} time_delta={}ms",
         writes_delta, time_delta
     );
+    */
 
     Some(time_delta as f64 / writes_delta as f64)
 }
@@ -195,31 +198,31 @@ mod tests {
     }
 
     fn sample_with_write_stats(
-    name: &str,
-    writes_completed: u64,
-    write_time_ms: u64,
-) -> DriveSample {
-    let mut fields = vec![0; 8];
-    fields[4] = writes_completed;
-    fields[7] = write_time_ms;
+        name: &str,
+        writes_completed: u64,
+        write_time_ms: u64,
+    ) -> DriveSample {
+        let mut fields = vec![0; 8];
+        fields[4] = writes_completed;
+        fields[7] = write_time_ms;
 
-    DriveSample {
-        id: DriveId {
-            name: name.to_string(),
-        },
-        temperature_millicelsius: None,
-        temperature_c: None,
-        disk_stats: Some(DiskStats { fields }),
-        write_latency_ms: None,
-        bytes_written: None,
+        DriveSample {
+            id: DriveId {
+                name: name.to_string(),
+            },
+            temperature_millicelsius: None,
+            temperature_c: None,
+            disk_stats: Some(DiskStats { fields }),
+            write_latency_ms: None,
+            bytes_written: None,
+        }
     }
-}
 
-#[test]
-fn calculates_write_latency_from_deltas() {
-    let old = sample_with_write_stats("nvme0n1", 100, 500);
-    let new = sample_with_write_stats("nvme0n1", 104, 520);
+    #[test]
+    fn calculates_write_latency_from_deltas() {
+        let old = sample_with_write_stats("nvme0n1", 100, 500);
+        let new = sample_with_write_stats("nvme0n1", 104, 520);
 
-    assert_eq!(drive_latency_ms(&old, &new), Some(5.0));
-}
+        assert_eq!(drive_latency_ms(&old, &new), Some(5.0));
+    }
 }

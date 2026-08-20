@@ -143,14 +143,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut assessment = assessment::Assessment::new();
 
     let mut child = launch::launch(&[
-        "-a",
-        "--info=progress2",
-        "--ignore-times",
-        "/home/richard/Downloads/debian-links/",
-        "/srv/canary/debian-links/",
-    ])?;
+    "-aHX",
+    "--numeric-ids",
+    "--info=progress2",
+    "--partial",
+    "--whole-file",
+    "--no-compress",
+    "-e",
+    "/usr/bin/ssh",
+     "--rsync-path=sudo -n /usr/bin/rsync",
+    "richard@Unas:/media/richard/Shareable/NVNas_Backup/",
+    "/srv/storage/",])?;
 
-    let status = loop {
+launch::poke_bwlimit(&child, 1000)?;
+println!("POKE  bwlimit = 1000 KB/s");    let status = loop {
+
         match child.try_wait()? {
             Some(status) => break status,
             None => {
@@ -179,8 +186,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Probing");
                     }
                 }
-                new.rsync_velocity_mb_s = algs::rsync_velocity_mb_s(&old, &new);
-                log::append_observation("logs/characterization.csv", &new)?;
+//                new.rsync_velocity_mb_s = algs::rsync_velocity_mb_s(&old, &new);
+//                if let Some(mb_s) = new.rsync_velocity_mb_s {
+//                }
 
                 for new_drive in &new.drives {
                     if matches!(recovery, RecoveryState::Normal) {

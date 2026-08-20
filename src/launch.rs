@@ -9,7 +9,8 @@ pub fn progress_bytes() -> Option<u64> {
 }
 
 pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
-        let mut child = Command::new(RSYNC_PATH)
+    let mut child = Command::new(RSYNC_PATH)
+        .arg("--bwlimit=1000")
         .args(args)
         .stdout(Stdio::piped())
         .spawn()?;
@@ -17,7 +18,7 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
     if let Some(stdout) = child.stdout.take() {
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
-
+            let mut last_bytes: Option<u64> = None;
             for chunk_result in reader.split(b'\r') {
                 let chunk = match chunk_result {
                     Ok(chunk) => chunk,
@@ -25,13 +26,24 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
                 };
 
                 let text = String::from_utf8_lossy(&chunk);
-
+                    println!("{}", text);
                 if let Some(first) = text.split_whitespace().next() {
                     let digits: String = first.chars().filter(|c| c.is_ascii_digit()).collect();
 
                     if !digits.is_empty() {
-                        eprintln!("PROGRESS BYTES {}", digits);
+                        if let Ok(bytes) = digits.parse::<u64>() {
+                        if let Some(last) = last_bytes {
+                            println!(
+                                "PROGRESS BYTES {}  {:.1} MB/s",
+                                bytes,
+                                (bytes - last) as f64 / 1_000_000.0
+                            );
+                        } else {
+                        }
+
+                        last_bytes = Some(bytes);
                         let _ = fs::write(PROGRESS_PATH, digits);
+                    }
                     }
                 }
             }
@@ -39,10 +51,7 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
     }
     Ok(child)
 }
-pub fn poke_bwlimit(
-    child: &Child,
-    kb_per_sec: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn poke_bwlimit(child: &Child, kb_per_sec: u64) -> Result<(), Box<dyn std::error::Error>> {
     let command = format!("set variable bwlimit = {}", kb_per_sec);
 
     let status = Command::new("sudo")
