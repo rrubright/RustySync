@@ -15,14 +15,16 @@ pub fn append_observation(
         .as_secs();
 
     for drive in &observation.drives {
-        let stats = drive.disk_stats.as_ref().unwrap();
+        let Some(stats) = drive.disk_stats.as_ref() else {
+            continue;
+        };
 
         writeln!(
             file,
             "{},{},{},{},{},{},{},{}",
             timestamp,
             drive.id.name,
-            drive.temperature_millicelsius.unwrap(),
+            drive.temperature_millicelsius.unwrap_or(0),
             stats.fields[4],
             stats.fields[6],
             stats.fields[7],

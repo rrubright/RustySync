@@ -9,6 +9,7 @@ mod phase;
 mod probe;
 mod state;
 mod types;
+mod preflight;
 
 use crate::phase::Phase;
 use crate::state::{ActionRequest, RecoveryAction, RecoveryState, State};
@@ -37,7 +38,11 @@ use std::time::Duration;
 // Rsync executes.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("LoadLevel Rust {}", init::LOADLEVEL_VERSION);
+    println!("RustySync {}", init::LOADLEVEL_VERSION);
+    let preflight = preflight::run()?;
+
+    println!("SOURCE      {}", preflight.source);
+    println!("DESTINATION {}", preflight.destination);
     let mut nvme_names: Vec<String> = fs::read_dir("/sys/class/block")?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
@@ -67,16 +72,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut recovery = RecoveryState::Normal;
-    let mut sample_log = SampleLog::new(state.config.calibration_samples);
-    for _ in 0..128 {
-        sample_log.push(Observation::new());
-    }
-
-    println!("After 128 pushes: {}", sample_log.len());
-
-    sample_log.push(Observation::new());
-
-    println!("After 129th push: {}", sample_log.len());
 
     init::init()?;
 
@@ -96,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Legacy calibration/self-test loop.
         //
         // This loop was used during bring-up to verify observation,
-        // temperature sensing, and missing-data detection before the
+        //         // temperature sensing, and missing-data detection before the
         // runtime rsync observation loop was implemented.
         //
         // The runtime loop below is now the primary observation engine.
@@ -166,6 +161,18 @@ println!("POKE  bwlimit = 1000 KB/s");    let status = loop {
                     new_drive.write_latency_ms = algs::drive_latency_ms(old_drive, new_drive);
                     new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
                 }
+                if let Some(drive) = new.drives.iter().find(|d| d.id.name == "nvme2n1") {
+                        if let Some(bytes) = drive.bytes_written.filter(|&b| b > 0) {
+                        println!(
+                            "=====================================================================> WRITE nvme2n1  bytes={}  latency={}",
+                            bytes,
+                            drive
+                                .write_latency_ms
+                                .map(|v| format!("{:.3} ms/write", v))
+                                .unwrap_or_else(|| "-".to_string())
+                        );
+                    }
+                }
                 match recovery {
                     RecoveryState::Normal => {}
 
@@ -225,17 +232,21 @@ println!("POKE  bwlimit = 1000 KB/s");    let status = loop {
                         (drive.temperature_millicelsius, drive.temperature_c)
                     {
                         println!(
-                            "DRV {:7}  T={:6} mC ({:4.1} C)  writes={}  sectors={}  write_ms={}",
+                            "DRV {:7}  T={:6} mC ({:4.1} C)  writes={}  sectors={}  write_ms={}  latency={}",
                             drive.id.name,
                             mc,
                             tc,
                             drive.disk_stats.as_ref().map_or(0, |d| d.fields[4]),
                             drive.disk_stats.as_ref().map_or(0, |d| d.fields[6]),
                             drive.disk_stats.as_ref().map_or(0, |d| d.fields[7]),
+                            drive
+                                .write_latency_ms
+                                .map(|v| format!("{:.2} ms/write", v))
+                                .unwrap_or_else(|| "-".to_string()),
                         );
-                    }
                 }
-                if let Some(drive) = new.drives.first() {
+            }
+                if let Some(drive) = new.drives.iter().find(|d| d.id.name == "nvme2n1") {
                     if let Some(burst_length) =
                         burst_tracker.record_sample(drive.bytes_written, drive.write_latency_ms)
                     {
@@ -243,7 +254,7 @@ println!("POKE  bwlimit = 1000 KB/s");    let status = loop {
                         println!("Assessment: {:?}", verdict);
                     }
                 }
-
+                log::append_observation("/src/logs/characterization.csv", &new)?;
                 old = new;
 
                 thread::sleep(Duration::from_millis(state.config.sample_interval_ms));
