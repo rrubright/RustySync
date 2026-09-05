@@ -7,8 +7,14 @@ pub fn append_observation(
     path: &str,
     observation: &Observation,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let new_file = !std::path::Path::new(path).exists();
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
+    if new_file {
+        writeln!(
+            file,
+        "timestamp,drive,temperature_millicelsius,writes,sectors_written,write_time_ms,rsync_progress_bytes,rsync_velocity_mb_s"
+        )?;
+    }
     let timestamp = observation
         .timestamp
         .duration_since(std::time::UNIX_EPOCH)?

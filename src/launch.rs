@@ -15,7 +15,7 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
     let _ = fs::remove_file(PROGRESS_PATH);
 
     let mut child = Command::new(RSYNC_PATH)
-        .arg("--bwlimit=37500")
+        .arg("--bwlimit=2000")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -12,13 +12,17 @@ mod types;
 mod preflight;
 
 use crate::phase::Phase;
-use crate::state::{ActionRequest, RecoveryAction, RecoveryState, State};
+use crate::state::{ActionRequest, RecoveryState, State};
 use crate::types::{Capabilities, Configuration, DriveCapability, DriveId, Observation, SampleLog};
 use std::fs;
 use std::thread;
 use std::time::Duration;
 
-// Main control loop.
+const CONTROL_DRIVE: &str = "nvme1n1";
+const DEFAULT_BWLIMIT_KB: u64 = 20;
+const NORMAL_BWLIMIT_KB: u64 = 40_000;
+const RECOVERY_TRIGGER_MS: f64 = 200.0;
+const QUIET_SAMPLES: u32 = 5;// Main control loop.
 //
 // Startup:
 //   - Initialize configuration and capabilities.
@@ -101,28 +105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..state.config.calibration_samples {
             let observation = observe::observe(&state.config, &state.capabilities);
 
-            for drive in &observation.drives {
-                if let (Some(mc), Some(tc)) = (
-                    drive.temperature_millicelsius,
-                    drive.temperature_c,
-                ) {
-                    println!(
-                        "DRV {:7}  T={:6} mC ({:4.1} C)  writes={}  sectors={}  write_ms={}",
-                        drive.id.name,
-                        mc,
-                        tc,
-                        drive.disk_stats.as_ref().map_or(0, |d| d.fields[4]),
-                        drive.disk_stats.as_ref().map_or(0, |d| d.fields[6]),
-                        drive.disk_stats.as_ref().map_or(0, |d| d.fields[7]),
-                    );
-                }
-                l
-                for flag in &observation.missing_flags {
-                    *missing_counts.entry(format!("{:?}", flag)).or_insert(0) += 1;
-                }
+            for flag in &observation.missing_flags {
+                *missing_counts.entry(format!("{:?}", flag)).or_insert(0) += 1;
             }
         }
-
         if !missing_counts.is_empty() {
             println!("Calibration summary:");
 
@@ -139,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut child = launch::launch(&[
     "-aHX",
+    "--bwlimit=20",
     "--numeric-ids",
     "--info=progress2",
     "--partial",
@@ -147,125 +134,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     "-e",
     "/usr/bin/ssh",
      "--rsync-path=sudo -n /usr/bin/rsync",
-    "richard@Unas:/media/richard/Shareable/NVNas_Backup/",
-    "/srv/storage/",])?;
+    "richard@192.168.1.176:/media/richard/Shareable/NVNas_Backup/",
+    "/srv/storage/",
+    ])?;
+// rsync starts at a conservative 20 KB/s fallback.
+// RustySync actively raises it to 40,000 KB/s for Normal operation.
+//
+// This is intentional. If rsync ever restores its invocation-time
+// bwlimit on its own, it falls back safely to 20 KB/s.
+//
+// Any write sample at or above RECOVERY_TRIGGER_MS forces 20 KB/s
+// and Recovery. Five consecutive no-write samples force 40,000 KB/s
+// and Normal, regardless of the current logical state. That quiet-window
+// repoke also repairs any silent fallback to the invocation-time limit.
 
-launch::poke_bwlimit(&child, 1000)?;
-println!("POKE  bwlimit = 1000 KB/s");    let status = loop {
-
+launch::poke_bwlimit(&child, NORMAL_BWLIMIT_KB)?;
+    let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
-            None => {
+
+        None => {
                 let mut new = observe::observe(&state.config, &state.capabilities);
                 for (old_drive, new_drive) in old.drives.iter().zip(new.drives.iter_mut()) {
                     new_drive.write_latency_ms = algs::drive_latency_ms(old_drive, new_drive);
-                    new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
+
+                  new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
                 }
-                if let Some(drive) = new.drives.iter().find(|d| d.id.name == "nvme2n1") {
+                if let Some(drive) = new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE) {
                         if let Some(bytes) = drive.bytes_written.filter(|&b| b > 0) {
-                        println!(
-                            "=====================================================================> WRITE nvme2n1  bytes={}  latency={}",
+
+                      println!(
+                            "==========> WRITE control-drive  bytes={}  latency={}",
                             bytes,
                             drive
-                                .write_latency_ms
+
+                              .write_latency_ms
                                 .map(|v| format!("{:.3} ms/write", v))
                                 .unwrap_or_else(|| "-".to_string())
                         );
+
+                  }
+                }
+                if let Some(drive) =
+                    new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE)
+                {
+                    if let Some(latency) = drive.write_latency_ms {
+                        if latency >= RECOVERY_TRIGGER_MS {
+                            launch::poke_bwlimit(&child, DEFAULT_BWLIMIT_KB)?;
+                            recovery = RecoveryState::Recovery { ticks: 0 };
+
+                            println!(
+                                "{} RECOVERY  latency={:.0} ms  bwlimit={} KB/s",
+                                "=".repeat(80),
+                                latency,
+                                DEFAULT_BWLIMIT_KB
+                            );
+                        }
                     }
                 }
+
                 match recovery {
-                    RecoveryState::Normal => {}
-
-                    RecoveryState::Recovery { .. } => match recovery.tick() {
-                        RecoveryAction::Resume => {
-                            launch::cont(&child)?;
-                            println!("Recovery complete. Entering probing state.");
-                        }
-
-                        RecoveryAction::None => {}
-
-                        action => {
-                            println!("Unexpected recovery action: {:?}", action);
-                        }
-                    },
-
-                    RecoveryState::Probing => {
-                        println!("Probing");
-                    }
+                    RecoveryState::Normal => {
                 }
-//                new.rsync_velocity_mb_s = algs::rsync_velocity_mb_s(&old, &new);
-//                if let Some(mb_s) = new.rsync_velocity_mb_s {
-//                }
+                    RecoveryState::Recovery { ticks } => {
+                        if let Some(drive) =
 
-                for new_drive in &new.drives {
-                    if matches!(recovery, RecoveryState::Normal) {
-                        if let Some(latency) = new_drive.write_latency_ms {
-                            if latency >= state.config.max_write_latency_ms {
-                                launch::interrupt(&child)?;
+                          new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE)
+                        {
+                            let writing =
+                                drive.bytes_written.is_some_and(|bytes| bytes > 0);
 
-                                println!(
-                    "Emergency latency limit reached: {:.0} ms/write. Interrupting rsync.",
-                    latency
-                );
 
-                                break;
-                            }
-
-                            if latency >= state.config.pause_write_latency_ms {
-                                launch::stop(&child)?;
-
-                                println!(
-                                    "Pause latency reached: {:.0} ms/write. JR paused.",
-                                    latency
-                                );
-
+                           if writing {
                                 recovery = RecoveryState::Recovery { ticks: 0 };
+                            } else {
+                                let empty_samples = ticks + 1;
 
-                                break;
-                            }
+                                  println!(
+                                        "{} RECOVERY  no-write {}/{}",
+                                        "=".repeat(80),
+                                        empty_samples,
+
+                                     QUIET_SAMPLES
+                                );
+                                if empty_samples >= QUIET_SAMPLES {
+                                    launch::poke_bwlimit(&child, NORMAL_BWLIMIT_KB)?;
+                                  recovery = RecoveryState::Normal;
+
+                                println!(
+                                    "{} NORMAL  bwlimit={} KB/s",
+
+                                  "=".repeat(80),
+                                    NORMAL_BWLIMIT_KB
+                                );
+                                } else {
+
+                                  recovery = RecoveryState::Recovery {
+                                        ticks: empty_samples,
+                                    };
+                                }
+
+                          }
                         }
                     }
+
+
+                  RecoveryState::Probing => {}
                 }
 
                 for drive in &new.drives {
-                    if let (Some(mc), Some(tc)) =
+
+                  if let (Some(mc), Some(tc)) =
                         (drive.temperature_millicelsius, drive.temperature_c)
                     {
-                        println!(
-                            "DRV {:7}  T={:6} mC ({:4.1} C)  writes={}  sectors={}  write_ms={}  latency={}",
-                            drive.id.name,
-                            mc,
-                            tc,
-                            drive.disk_stats.as_ref().map_or(0, |d| d.fields[4]),
-                            drive.disk_stats.as_ref().map_or(0, |d| d.fields[6]),
-                            drive.disk_stats.as_ref().map_or(0, |d| d.fields[7]),
-                            drive
-                                .write_latency_ms
-                                .map(|v| format!("{:.2} ms/write", v))
-                                .unwrap_or_else(|| "-".to_string()),
-                        );
-                }
+                       
+
+              }
             }
-                if let Some(drive) = new.drives.iter().find(|d| d.id.name == "nvme2n1") {
+                if let Some(drive) = new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE) {
                     if let Some(burst_length) =
-                        burst_tracker.record_sample(drive.bytes_written, drive.write_latency_ms)
+
+                      burst_tracker.record_sample(drive.bytes_written, drive.write_latency_ms)
                     {
                         let verdict = assessment.record_burst(burst_length);
-                        println!("Assessment: {:?}", verdict);
-                    }
+                  }
                 }
                 log::append_observation("/src/logs/characterization.csv", &new)?;
                 old = new;
 
-                thread::sleep(Duration::from_millis(state.config.sample_interval_ms));
+
+               thread::sleep(Duration::from_millis(state.config.sample_interval_ms));
             }
         }
     };
 
-    println!("rsync exited with {}", status);
+
+   println!("rsync exited with {}", status);
     println!("PASS  algs");
     state.phase = Phase::Completed;
     println!("SUCCESS");
 
-    Ok(())
+
+   Ok(())
 }
+
