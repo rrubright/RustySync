@@ -1,4 +1,3 @@
-
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +21,6 @@ pub fn run() -> Result<PreflightResult, Box<dyn std::error::Error>> {
 
     validate_source(&source)?;
     validate_destination(&destination)?;
-
     let result = PreflightResult {
         source,
         destination,
@@ -33,11 +31,24 @@ pub fn run() -> Result<PreflightResult, Box<dyn std::error::Error>> {
 
     Ok(result)
 }
+pub fn backing_device(destination: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "--target", destination])
+        .output()?;
 
-fn prompt_with_default(
-    label: &str,
-    default: Option<&str>,
-) -> Result<String, io::Error> {
+    if !output.status.success() {
+        return Err(format!("could not resolve backing device for {destination}").into());
+    }
+
+    let source = String::from_utf8(output.stdout)?.trim().to_string();
+
+    if source.is_empty() {
+        return Err(format!("no backing device found for {destination}").into());
+    }
+
+    Ok(source)
+}
+fn prompt_with_default(label: &str, default: Option<&str>) -> Result<String, io::Error> {
     match default {
         Some(value) => print!("{label} [{value}]: "),
         None => print!("{label}: "),
@@ -140,8 +151,7 @@ fn save_last_run(result: &PreflightResult) -> Result<(), Box<dyn std::error::Err
 
     let contents = format!(
         "source={}\ndestination={}\n",
-        result.source,
-        result.destination
+        result.source, result.destination
     );
 
     fs::write(path, contents)?;

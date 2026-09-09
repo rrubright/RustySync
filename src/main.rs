@@ -6,10 +6,10 @@ mod log;
 mod nvme;
 mod observe;
 mod phase;
+mod preflight;
 mod probe;
 mod state;
 mod types;
-mod preflight;
 
 use crate::phase::Phase;
 use crate::state::{ActionRequest, RecoveryState, State};
@@ -18,11 +18,10 @@ use std::fs;
 use std::thread;
 use std::time::Duration;
 
-const CONTROL_DRIVE: &str = "nvme1n1";
-const DEFAULT_BWLIMIT_KB: u64 = 20;
-const NORMAL_BWLIMIT_KB: u64 = 40_000;
-const RECOVERY_TRIGGER_MS: f64 = 200.0;
-const QUIET_SAMPLES: u32 = 5;// Main control loop.
+const SLOW_POKE_KB: u64 = 1000;
+const FAST_POKE_KB: u64 = 40_000;
+const WINDOW_TICKS: u32 = 10;
+const WRITES_PER_WINDOW_LIMIT: u64 = 50;
 //
 // Startup:
 //   - Initialize configuration and capabilities.
@@ -44,16 +43,25 @@ const QUIET_SAMPLES: u32 = 5;// Main control loop.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RustySync {}", init::LOADLEVEL_VERSION);
     let preflight = preflight::run()?;
+    let backing_device = preflight::backing_device(&preflight.destination)?;
+    let backing_name = std::path::Path::new(&backing_device)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or("could not extract backing device name")?;
 
+    let backing_nvme = backing_name
+        .strip_suffix("p1")
+        .ok_or("destination is not a simple NVMe partition")?
+        .to_string();
+    println!("BACKING     {} -> {}", backing_device, backing_nvme);
     println!("SOURCE      {}", preflight.source);
     println!("DESTINATION {}", preflight.destination);
-    let mut nvme_names: Vec<String> = fs::read_dir("/sys/class/block")?
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| name.starts_with("nvme") && !name.contains('p'))
-        .collect();
 
-    nvme_names.sort();
+    // Previously discovered all NVMe devices in /sys/class/block.
+    // For now, observe only the NVMe backing /srv/storage.
+    // Later, replace this with destination-topology discovery for RAID/LVM.
+
+    let nvme_names = vec![backing_nvme.clone()];
 
     let drives = nvme_names
         .into_iter()
@@ -124,157 +132,133 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut assessment = assessment::Assessment::new();
 
     let mut child = launch::launch(&[
-    "-aHX",
-    "--bwlimit=20",
-    "--numeric-ids",
-    "--info=progress2",
-    "--partial",
-    "--whole-file",
-    "--no-compress",
-    "-e",
-    "/usr/bin/ssh",
-     "--rsync-path=sudo -n /usr/bin/rsync",
-    "richard@192.168.1.176:/media/richard/Shareable/NVNas_Backup/",
-    "/srv/storage/",
+        "-aHX",
+        "--bwlimit=40000",
+        "--numeric-ids",
+        "--info=progress2",
+        "--partial",
+        "--whole-file",
+        "--no-compress",
+        "-e",
+        "/usr/bin/ssh",
+        "--rsync-path=sudo -n /usr/bin/rsync",
+        "richard@192.168.1.176:/media/richard/Shareable/NVNas_Backup/",
+        "/srv/storage/",
     ])?;
-// rsync starts at a conservative 20 KB/s fallback.
-// RustySync actively raises it to 40,000 KB/s for Normal operation.
-//
-// This is intentional. If rsync ever restores its invocation-time
-// bwlimit on its own, it falls back safely to 20 KB/s.
-//
-// Any write sample at or above RECOVERY_TRIGGER_MS forces 20 KB/s
-// and Recovery. Five consecutive no-write samples force 40,000 KB/s
-// and Normal, regardless of the current logical state. That quiet-window
-// repoke also repairs any silent fallback to the invocation-time limit.
+    // rsync starts at a conservative 20 KB/s fallback.
+    // RustySync actively raises it to 40,000 KB/s for Normal operation.
+    //
+    // This is intentional. If rsync ever restores its invocation-time
+    // bwlimit on its own, it falls back safely to 20 KB/s.
+    //
+    // Any write sample at or above RECOVERY_TRIGGER_MS forces 20 KB/s
+    // and Recovery. Five consecutive no-write samples force 40,000 KB/s
+    // and Normal, regardless of the current logical state. That quiet-window
+    // repoke also repairs any silent fallback to the invocation-time limit.
 
-launch::poke_bwlimit(&child, NORMAL_BWLIMIT_KB)?;
+    launch::poke_bwlimit(&child, FAST_POKE_KB)?;
+    let mut window_ticks: u32 = 0;
+    let mut fast = true;
+    let mut window_start_writes: Option<u64> = None;
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
 
-        None => {
+            None => {
                 let mut new = observe::observe(&state.config, &state.capabilities);
+
                 for (old_drive, new_drive) in old.drives.iter().zip(new.drives.iter_mut()) {
                     new_drive.write_latency_ms = algs::drive_latency_ms(old_drive, new_drive);
-
-                  new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
+                    new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
                 }
-                if let Some(drive) = new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE) {
-                        if let Some(bytes) = drive.bytes_written.filter(|&b| b > 0) {
-
-                      println!(
-                            "==========> WRITE control-drive  bytes={}  latency={}",
+                let canary = new
+                    .drives
+                    .iter()
+                    .filter(|d| d.id.name == backing_nvme)
+                    .max_by(|a, b| {
+                        a.write_latency_ms
+                            .unwrap_or(0.0)
+                            .partial_cmp(&b.write_latency_ms.unwrap_or(0.0))
+                            .unwrap()
+                    });
+                if let Some(drive) = canary.as_ref() {
+                    if let Some(bytes) = drive.bytes_written.filter(|&b| b > 0) {
+                        println!(
+                            "==========> {}  {}={} KB/s  bytes={}  latency={}",
+                            drive.id.name,
+                            if fast { "FAST_POKE" } else { "SLOW_POKE" },
+                            if fast { FAST_POKE_KB } else { SLOW_POKE_KB },
                             bytes,
                             drive
-
-                              .write_latency_ms
+                                .write_latency_ms
                                 .map(|v| format!("{:.3} ms/write", v))
                                 .unwrap_or_else(|| "-".to_string())
                         );
-
-                  }
-                }
-                if let Some(drive) =
-                    new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE)
-                {
-                    if let Some(latency) = drive.write_latency_ms {
-                        if latency >= RECOVERY_TRIGGER_MS {
-                            launch::poke_bwlimit(&child, DEFAULT_BWLIMIT_KB)?;
-                            recovery = RecoveryState::Recovery { ticks: 0 };
-
-                            println!(
-                                "{} RECOVERY  latency={:.0} ms  bwlimit={} KB/s",
-                                "=".repeat(80),
-                                latency,
-                                DEFAULT_BWLIMIT_KB
-                            );
-                        }
                     }
                 }
 
-                match recovery {
-                    RecoveryState::Normal => {
-                }
-                    RecoveryState::Recovery { ticks } => {
-                        if let Some(drive) =
+                if let Some(drive) = canary.as_ref() {
+                    if let Some(current_writes) = drive
+                        .disk_stats
+                        .as_ref()
+                        .and_then(|stats| stats.fields.get(4).copied())
+                    {
+                        if window_start_writes.is_none() {
+                            window_start_writes = Some(current_writes);
+                        }
 
-                          new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE)
-                        {
-                            let writing =
-                                drive.bytes_written.is_some_and(|bytes| bytes > 0);
+                        window_ticks += 1;
 
-
-                           if writing {
-                                recovery = RecoveryState::Recovery { ticks: 0 };
+                        if window_ticks >= WINDOW_TICKS {
+                            let writes_in_window =
+                                current_writes.saturating_sub(window_start_writes.unwrap());
+                            println!(
+                                "==========> WINDOW  drive={}  state={}  writes={}  latency={}",
+                                drive.id.name,
+                                if fast { "FAST" } else { "SLOW" },
+                                writes_in_window,
+                                drive
+                                    .write_latency_ms
+                                    .map(|v| format!("{:.3} ms/write", v))
+                                    .unwrap_or_else(|| "-".to_string())
+                            );
+                            let want_fast = if fast {
+                                writes_in_window > WRITES_PER_WINDOW_LIMIT
                             } else {
-                                let empty_samples = ticks + 1;
-
-                                  println!(
-                                        "{} RECOVERY  no-write {}/{}",
-                                        "=".repeat(80),
-                                        empty_samples,
-
-                                     QUIET_SAMPLES
-                                );
-                                if empty_samples >= QUIET_SAMPLES {
-                                    launch::poke_bwlimit(&child, NORMAL_BWLIMIT_KB)?;
-                                  recovery = RecoveryState::Normal;
-
-                                println!(
-                                    "{} NORMAL  bwlimit={} KB/s",
-
-                                  "=".repeat(80),
-                                    NORMAL_BWLIMIT_KB
-                                );
+                                writes_in_window > WRITES_PER_WINDOW_LIMIT
+                                    && drive.write_latency_ms.is_some_and(|ms| ms < 200.0)
+                            };
+                            if want_fast != fast {
+                                if want_fast {
+                                    launch::poke_bwlimit(&child, FAST_POKE_KB)?;
                                 } else {
-
-                                  recovery = RecoveryState::Recovery {
-                                        ticks: empty_samples,
-                                    };
+                                    launch::poke_bwlimit(&child, SLOW_POKE_KB)?;
                                 }
 
-                          }
+                                fast = want_fast;
+                            }
+
+                            window_ticks = 0;
+                            window_start_writes = Some(current_writes);
                         }
                     }
-
-
-                  RecoveryState::Probing => {}
                 }
 
-                for drive in &new.drives {
-
-                  if let (Some(mc), Some(tc)) =
-                        (drive.temperature_millicelsius, drive.temperature_c)
-                    {
-                       
-
-              }
-            }
-                if let Some(drive) = new.drives.iter().find(|d| d.id.name == CONTROL_DRIVE) {
-                    if let Some(burst_length) =
-
-                      burst_tracker.record_sample(drive.bytes_written, drive.write_latency_ms)
-                    {
-                        let verdict = assessment.record_burst(burst_length);
-                  }
+                if preflight.debug_log {
+                    log::append_observation("/src/logs/characterization.csv", &new)?;
                 }
-                log::append_observation("/src/logs/characterization.csv", &new)?;
+
                 old = new;
 
-
-               thread::sleep(Duration::from_millis(state.config.sample_interval_ms));
+                thread::sleep(Duration::from_millis(state.config.sample_interval_ms));
             }
         }
     };
 
-
-   println!("rsync exited with {}", status);
+    println!("rsync exited with {}", status);
     println!("PASS  algs");
     state.phase = Phase::Completed;
     println!("SUCCESS");
 
-
-   Ok(())
+    Ok(())
 }
-

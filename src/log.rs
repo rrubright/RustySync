@@ -12,7 +12,7 @@ pub fn append_observation(
     if new_file {
         writeln!(
             file,
-        "timestamp,drive,temperature_millicelsius,writes,sectors_written,write_time_ms,rsync_progress_bytes,rsync_velocity_mb_s"
+        "timestamp,drive,temperature_millicelsius,writes,sectors_written,write_time_ms,weighted_io_time_ms,rsync_progress_bytes,rsync_velocity_mb_s"
         )?;
     }
     let timestamp = observation
@@ -27,13 +27,14 @@ pub fn append_observation(
 
         writeln!(
             file,
-            "{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{}",
             timestamp,
             drive.id.name,
             drive.temperature_millicelsius.unwrap_or(0),
             stats.fields[4],
             stats.fields[6],
             stats.fields[7],
+            stats.fields.get(10).copied().unwrap_or(0),
             observation.rsync_progress_bytes.unwrap_or(0),
             observation.rsync_velocity_mb_s.unwrap_or(0.0),
         )?;

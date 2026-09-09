@@ -15,7 +15,6 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
     let _ = fs::remove_file(PROGRESS_PATH);
 
     let mut child = Command::new(RSYNC_PATH)
-        .arg("--bwlimit=2000")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -43,10 +42,7 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
                 eprintln!("RAW {:?}", text);
 
                 if let Some(first) = text.split_whitespace().next() {
-                    let digits: String = first
-                        .chars()
-                        .filter(|c| c.is_ascii_digit())
-                        .collect();
+                    let digits: String = first.chars().filter(|c| c.is_ascii_digit()).collect();
 
                     if !digits.is_empty() {
                         if let Ok(bytes) = digits.parse::<u64>() {
@@ -83,14 +79,12 @@ pub fn launch(args: &[&str]) -> Result<Child, Box<dyn std::error::Error>> {
     Ok(child)
 }
 
-pub fn poke_bwlimit(
-    child: &Child,
-    kb_per_sec: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn poke_bwlimit(child: &Child, kb_per_sec: u64) -> Result<(), Box<dyn std::error::Error>> {
     let command = format!("set variable bwlimit = {}", kb_per_sec);
 
     let status = Command::new("sudo")
         .args([
+            "-n",
             "gdb",
             "-q",
             "-batch",
@@ -101,6 +95,8 @@ pub fn poke_bwlimit(
             "-ex",
             "detach",
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?;
 
     if !status.success() {
@@ -114,22 +110,19 @@ pub fn stop(child: &Child) -> std::io::Result<()> {
     use nix::sys::signal::{kill, Signal::SIGSTOP};
     use nix::unistd::Pid;
 
-    kill(Pid::from_raw(child.id() as i32), SIGSTOP)
-        .map_err(std::io::Error::other)
+    kill(Pid::from_raw(child.id() as i32), SIGSTOP).map_err(std::io::Error::other)
 }
 
 pub fn cont(child: &Child) -> std::io::Result<()> {
     use nix::sys::signal::{kill, Signal::SIGCONT};
     use nix::unistd::Pid;
 
-    kill(Pid::from_raw(child.id() as i32), SIGCONT)
-        .map_err(std::io::Error::other)
+    kill(Pid::from_raw(child.id() as i32), SIGCONT).map_err(std::io::Error::other)
 }
 
 pub fn interrupt(child: &Child) -> std::io::Result<()> {
     use nix::sys::signal::{kill, Signal::SIGINT};
     use nix::unistd::Pid;
 
-    kill(Pid::from_raw(child.id() as i32), SIGINT)
-        .map_err(std::io::Error::other)
+    kill(Pid::from_raw(child.id() as i32), SIGINT).map_err(std::io::Error::other)
 }
