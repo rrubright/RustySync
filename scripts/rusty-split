@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+project_dir=$(cd -- "$script_dir/.." && pwd)
+if [[ ${1:-} == --run ]]; then
+    : "${RUSTYSYNC_RUN_DIR:?Missing run directory}"
+    export RUSTYSYNC_CSV="$RUSTYSYNC_RUN_DIR/characterization.csv"
+    set +e
+    "$project_dir/target/debug/loadlevel" 2>> "$RUSTYSYNC_RUN_DIR/events.log"
+    result=$?
+    printf '\nRusty exited with status %s. Logs: %s\n' "$result" "$RUSTYSYNC_RUN_DIR"
+    read -r -p 'Press Enter to close this pane.' _
+    exit "$result"
+fi
+command -v tmux >/dev/null || { echo 'Install tmux to use the top/bottom display.' >&2; exit 1; }
+[[ -x "$project_dir/target/debug/loadlevel" ]] || { echo 'Build Rusty with cargo build first.' >&2; exit 1; }
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/rustysync.XXXXXXXX")
+touch "$run_dir/events.log"
+session="rusty-${run_dir##*.}"
+printf -v run_command 'env RUSTYSYNC_RUN_DIR=%q bash %q --run' "$run_dir" "$script_dir/rusty-split"
+printf -v event_command 'tail -n +1 -F -- %q' "$run_dir/events.log"
+tmux new-session -d -s "$session" "$run_command"
+tmux split-window -v -p 35 -t "$session":0 "$event_command"
+tmux select-pane -t "$session":0.0
+if [[ -n ${TMUX:-} ]]; then
+    tmux switch-client -t "$session"
+else
+    tmux attach-session -t "$session"
+fi

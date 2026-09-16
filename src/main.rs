@@ -8,6 +8,9 @@ mod observe;
 mod phase;
 mod preflight;
 mod probe;
+mod latency_control;
+mod topology;
+mod fleet;
 mod state;
 mod types;
 
@@ -16,52 +19,25 @@ use crate::state::{ActionRequest, RecoveryState, State};
 use crate::types::{Capabilities, Configuration, DriveCapability, DriveId, Observation, SampleLog};
 use std::fs;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SLOW_POKE_KB: u64 = 1000;
 const FAST_POKE_KB: u64 = 40_000;
-const WINDOW_TICKS: u32 = 10;
-const WRITES_PER_WINDOW_LIMIT: u64 = 50;
-//
-// Startup:
-//   - Initialize configuration and capabilities.
-//   - Collect calibration observations.
-//   - Establish baseline measurements.
-//
-// Runtime loop:
-//   - Acquire a new Observation.
-//   - Compute derived metrics (latency, transfer velocity, etc.).
-//   - Evaluate system state.
-//   - Apply decisions to rsync.
-//   - Log observations and decisions.
-//
-// Observe reports facts.
-// Algs derives meaning.
-// State decides.
-// Rsync executes.
+
+// Rusty slows on the slope of smoothed latency and recovers on a valid
+// sub-millisecond reading. Missing latency never clears the SLOW state.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RustySync {}", init::LOADLEVEL_VERSION);
+    println!("CONTROL slow trigger={} ms/s; fast={} KiB/s; slow={} KiB/s; recovery latency<1 ms",
+        latency_control::SLOW_SLOPE_MS_PER_SEC, FAST_POKE_KB, SLOW_POKE_KB);
     let preflight = preflight::run()?;
-    let backing_device = preflight::backing_device(&preflight.destination)?;
-    let backing_name = std::path::Path::new(&backing_device)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or("could not extract backing device name")?;
-
-    let backing_nvme = backing_name
-        .strip_suffix("p1")
-        .ok_or("destination is not a simple NVMe partition")?
-        .to_string();
-    println!("BACKING     {} -> {}", backing_device, backing_nvme);
+    let nvme_names = topology::discover(&preflight.destination)?;
+    println!("MONITORING  {}", nvme_names.join(", "));
     println!("SOURCE      {}", preflight.source);
     println!("DESTINATION {}", preflight.destination);
-
-    // Previously discovered all NVMe devices in /sys/class/block.
-    // For now, observe only the NVMe backing /srv/storage.
-    // Later, replace this with destination-topology discovery for RAID/LVM.
-
-    let nvme_names = vec![backing_nvme.clone()];
+    let mut controls = fleet::Fleet::new(&nvme_names);
+    let mut canary_name = nvme_names[0].clone();
 
     let drives = nvme_names
         .into_iter()
@@ -131,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut burst_tracker = assessment::BurstTracker::new(state.config.smoothing_frames);
     let mut assessment = assessment::Assessment::new();
 
+    // Use the selected destination for both monitoring and the transfer.
     let mut child = launch::launch(&[
         "-aHX",
         "--bwlimit=40000",
@@ -142,24 +119,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "-e",
         "/usr/bin/ssh",
         "--rsync-path=sudo -n /usr/bin/rsync",
-        "richard@192.168.1.176:/media/richard/Shareable/NVNas_Backup/",
-        "/srv/storage/",
+        preflight.source.as_str(),
+        preflight.destination.as_str(),
     ])?;
-    // rsync starts at a conservative 20 KB/s fallback.
-    // RustySync actively raises it to 40,000 KB/s for Normal operation.
-    //
-    // This is intentional. If rsync ever restores its invocation-time
-    // bwlimit on its own, it falls back safely to 20 KB/s.
-    //
-    // Any write sample at or above RECOVERY_TRIGGER_MS forces 20 KB/s
-    // and Recovery. Five consecutive no-write samples force 40,000 KB/s
-    // and Normal, regardless of the current logical state. That quiet-window
-    // repoke also repairs any silent fallback to the invocation-time limit.
+    // Match the invocation's 40,000 limit initially. Subsequent pokes happen
+    // only when the FAST/SLOW state changes; there is no periodic reassertion.
 
     launch::poke_bwlimit(&child, FAST_POKE_KB)?;
-    let mut window_ticks: u32 = 0;
+    log::report_poke("POKE INITIAL", &canary_name, true, FAST_POKE_KB, None, None, None);
+    let sample_clock = Instant::now();
     let mut fast = true;
-    let mut window_start_writes: Option<u64> = None;
+    let mut progress_rate = algs::ProgressRate::new();
+    let mut last_summary = Instant::now();
+    let csv_path = std::env::var("RUSTYSYNC_CSV").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_secs();
+        format!("{home}/.local/state/rustysync/characterization-{stamp}.csv")
+    });
+
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
@@ -167,85 +145,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => {
                 let mut new = observe::observe(&state.config, &state.capabilities);
 
-                for (old_drive, new_drive) in old.drives.iter().zip(new.drives.iter_mut()) {
-                    new_drive.write_latency_ms = algs::drive_latency_ms(old_drive, new_drive);
-                    new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
-                }
-                let canary = new
-                    .drives
-                    .iter()
-                    .filter(|d| d.id.name == backing_nvme)
-                    .max_by(|a, b| {
-                        a.write_latency_ms
-                            .unwrap_or(0.0)
-                            .partial_cmp(&b.write_latency_ms.unwrap_or(0.0))
-                            .unwrap()
-                    });
-                if let Some(drive) = canary.as_ref() {
-                    if let Some(bytes) = drive.bytes_written.filter(|&b| b > 0) {
-                        println!(
-                            "==========> {}  {}={} KB/s  bytes={}  latency={}",
-                            drive.id.name,
-                            if fast { "FAST_POKE" } else { "SLOW_POKE" },
-                            if fast { FAST_POKE_KB } else { SLOW_POKE_KB },
-                            bytes,
-                            drive
-                                .write_latency_ms
-                                .map(|v| format!("{:.3} ms/write", v))
-                                .unwrap_or_else(|| "-".to_string())
-                        );
+                for new_drive in &mut new.drives {
+                    if let Some(old_drive) = old.drives.iter().find(|d| d.id.name == new_drive.id.name) {
+                        new_drive.write_latency_ms = algs::drive_latency_ms(old_drive, new_drive);
+                        new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
                     }
                 }
+                let seconds = sample_clock.elapsed().as_secs_f64();
+                new.rsync_velocity_mb_s = progress_rate.sample(seconds, new.rsync_progress_bytes);
+                let decision = controls.sample(seconds, &new.drives);
+                let want_fast = decision.fast;
+                let latency = decision.latency;
+                let slope = decision.slope;
+                if decision.canary != canary_name {
+                    canary_name = decision.canary;
+                    log::report_poke("CANARY", &canary_name, fast,
+                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB },
+                        slope, latency, new.rsync_velocity_mb_s);
+                }
+                if want_fast != fast {
+                    launch::poke_bwlimit(&child, if want_fast { FAST_POKE_KB } else { SLOW_POKE_KB })?;
+                    fast = want_fast;
+                    log::report_poke("POKE CHANGE", &canary_name, fast,
+                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB }, slope, latency, new.rsync_velocity_mb_s);
+                    last_summary = Instant::now();
+                }
 
-                if let Some(drive) = canary.as_ref() {
-                    if let Some(current_writes) = drive
-                        .disk_stats
-                        .as_ref()
-                        .and_then(|stats| stats.fields.get(4).copied())
-                    {
-                        if window_start_writes.is_none() {
-                            window_start_writes = Some(current_writes);
-                        }
-
-                        window_ticks += 1;
-
-                        if window_ticks >= WINDOW_TICKS {
-                            let writes_in_window =
-                                current_writes.saturating_sub(window_start_writes.unwrap());
-                            println!(
-                                "==========> WINDOW  drive={}  state={}  writes={}  latency={}",
-                                drive.id.name,
-                                if fast { "FAST" } else { "SLOW" },
-                                writes_in_window,
-                                drive
-                                    .write_latency_ms
-                                    .map(|v| format!("{:.3} ms/write", v))
-                                    .unwrap_or_else(|| "-".to_string())
-                            );
-                            let want_fast = if fast {
-                                writes_in_window > WRITES_PER_WINDOW_LIMIT
-                            } else {
-                                writes_in_window > WRITES_PER_WINDOW_LIMIT
-                                    && drive.write_latency_ms.is_some_and(|ms| ms < 200.0)
-                            };
-                            if want_fast != fast {
-                                if want_fast {
-                                    launch::poke_bwlimit(&child, FAST_POKE_KB)?;
-                                } else {
-                                    launch::poke_bwlimit(&child, SLOW_POKE_KB)?;
-                                }
-
-                                fast = want_fast;
-                            }
-
-                            window_ticks = 0;
-                            window_start_writes = Some(current_writes);
-                        }
-                    }
+                // Show live status even when optional CSV logging is disabled.
+                if last_summary.elapsed() >= Duration::from_secs(5) {
+                    log::report_poke("STATUS", &canary_name, fast,
+                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB },
+                        slope, latency, new.rsync_velocity_mb_s);
+                    last_summary = Instant::now();
                 }
 
                 if preflight.debug_log {
-                    log::append_observation("/src/logs/characterization.csv", &new)?;
+                    log::append_observation(&csv_path, &new, fast,
+                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB }, slope)?;
                 }
 
                 old = new;
@@ -258,6 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("rsync exited with {}", status);
     println!("PASS  algs");
     state.phase = Phase::Completed;
+    if !status.success() {
+        return Err(format!("rsync failed: {status}").into());
+    }
     println!("SUCCESS");
 
     Ok(())

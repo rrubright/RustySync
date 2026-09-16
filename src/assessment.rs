@@ -1,6 +1,9 @@
+//! Burst-assessment policy, currently not called by the runtime controller.
+//! Burst lengths count samples with writes, not seconds or elapsed ticks.
+
 use crate::algs::RunningAverage;
 
-// Shorter bursts are dominated by rsync startup overhead and
+/// Shorter bursts are dominated by rsync startup overhead and
 /// do not provide a meaningful assessment.
 const MIN_MEANINGFUL_BURST: u32 = 5;
 
@@ -83,6 +86,8 @@ impl BurstTracker {
         }
     }
 
+    // Idle or missing-write samples do not end an active burst. Only a
+    // persistent latency rise emits its length; the triggering sample is excluded.
     pub fn record_sample(
         &mut self,
         bytes_written: Option<u64>,
@@ -129,6 +134,8 @@ impl BurstTracker {
                 let sigma = variance.sqrt();
                 let rise_threshold = MIN_LATENCY_RISE_MS.max(SIGMA_MULTIPLIER * sigma);
 
+                // Either an absolute/noise-adjusted rise OR a relative rise
+                // qualifies. The ratio test can fire below MIN_LATENCY_RISE_MS.
                 let triggered =
                     current - floor >= rise_threshold || current >= mean * BASELINE_RATIO;
 

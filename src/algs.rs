@@ -37,10 +37,10 @@ impl RunningAverage {
 /// Compute average write latency in milliseconds per completed write.
 
 pub fn write_latency_ms(old: &DiskStats, new: &DiskStats) -> Option<f64> {
-    // DiskStats::fields begins with /proc/diskstats field 3.
+    // DiskStats::fields starts after major, minor, and device name.
     // Therefore:
-    // fields[4] = writes completed  (original field 7)
-    // fields[7] = write time in ms (original field 10)
+    // fields[4] = writes completed  (zero-based column 7)
+    // fields[7] = write time in ms (zero-based column 10)
     let old_writes = *old.fields.get(4)?;
     let old_time_ms = *old.fields.get(7)?;
     let new_writes = *new.fields.get(4)?;
@@ -52,6 +52,8 @@ pub fn write_latency_ms(old: &DiskStats, new: &DiskStats) -> Option<f64> {
         old_writes, old_time_ms, new_writes, new_time_ms
     );
     */
+    // A reset/decrease or an interval without completed writes has no usable
+    // latency delta; None is not evidence of zero latency.
     let writes_delta = new_writes.checked_sub(old_writes)?;
     let time_delta = new_time_ms.checked_sub(old_time_ms)?;
 
@@ -79,8 +81,8 @@ pub fn drive_bytes_written(
     old: &crate::types::DriveSample,
     new: &crate::types::DriveSample,
 ) -> Option<u64> {
-    // DiskStats::fields begins with /proc/diskstats field 3.
-    // fields[6] = sectors written (original field 9).
+    // DiskStats::fields starts after major, minor, and device name.
+    // fields[6] = sectors written (zero-based column 9).
     let old_sectors = *old.disk_stats.as_ref()?.fields.get(6)?;
     let new_sectors = *new.disk_stats.as_ref()?.fields.get(6)?;
 
@@ -224,5 +226,60 @@ mod tests {
         let new = sample_with_write_stats("nvme0n1", 104, 520);
 
         assert_eq!(drive_latency_ms(&old, &new), Some(5.0));
+    }
+}
+
+/// Time-windowed progress rate; repeated counters are real zero progress,
+/// while missing counters invalidate the window rather than inventing a rate.
+pub struct ProgressRate {
+    samples: VecDeque<(f64, u64)>,
+}
+impl ProgressRate {
+    pub fn new() -> Self {
+        Self {
+            samples: VecDeque::new(),
+        }
+    }
+    pub fn sample(&mut self, seconds: f64, bytes: Option<u64>) -> Option<f64> {
+        let Some(bytes) = bytes else {
+            self.samples.clear();
+            return None;
+        };
+        if self
+            .samples
+            .back()
+            .is_some_and(|&(t, b)| seconds <= t || bytes < b)
+        {
+            self.samples.clear();
+        }
+        self.samples.push_back((seconds, bytes));
+        while self.samples.len() > 2 && self.samples[1].0 <= seconds - 10.0 {
+            self.samples.pop_front();
+        }
+        let &(start, first_bytes) = self.samples.front()?;
+        let elapsed = seconds - start;
+        (elapsed > 0.0).then(|| (bytes - first_bytes) as f64 / elapsed / 1_000_000.0)
+    }
+}
+#[cfg(test)]
+mod progress_rate_tests {
+    use super::*;
+    #[test]
+    fn averages_batched_progress_and_ages_out_old_data() {
+        let mut rate = ProgressRate::new();
+        assert_eq!(rate.sample(0.0, Some(0)), None);
+        for t in 1..=10 {
+            rate.sample(t as f64, Some(if t < 10 { 0 } else { 100_000_000 }));
+        }
+        assert_eq!(rate.sample(11.0, Some(100_000_000)), Some(10.0));
+        assert_eq!(rate.sample(21.0, Some(100_000_000)), Some(0.0));
+    }
+    #[test]
+    fn missing_and_reset_counters_require_a_new_baseline() {
+        let mut rate = ProgressRate::new();
+        rate.sample(0.0, Some(100));
+        assert_eq!(rate.sample(1.0, Some(0)), None);
+        assert_eq!(rate.sample(2.0, None), None);
+        assert_eq!(rate.sample(3.0, Some(100)), None);
     }
 }
