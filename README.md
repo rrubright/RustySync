@@ -14,7 +14,8 @@ Each drive has its own ten-sample, in-memory latency window. Any drive's slow st
 reduces the entire stream. Every drive that triggered slowing must recover before
 FAST resumes; missing or idle samples do not count as recovery. The canary is the
 highest-latency drive among latched slow drives, or among all drives when none is slow.
-The existing slope threshold and sub-millisecond recovery threshold are unchanged.
+The slope threshold remains 10 ms/s. A valid latency reading below 1000 ms clears
+a drive’s slow latch.
 FAST remains 40,000 KiB/s and SLOW remains 1,000 KiB/s.
 
 Console status appears every five seconds. Canary and rate changes appear immediately.

@@ -25,12 +25,12 @@ const SLOW_POKE_KB: u64 = 1000;
 const FAST_POKE_KB: u64 = 40_000;
 
 // Rusty slows on the slope of smoothed latency and recovers on a valid
-// sub-millisecond reading. Missing latency never clears the SLOW state.
+// reading below 1000 ms. Missing latency never clears the SLOW state.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RustySync {}", init::LOADLEVEL_VERSION);
-    println!("CONTROL slow trigger={} ms/s; fast={} KiB/s; slow={} KiB/s; recovery latency<1 ms",
-        latency_control::SLOW_SLOPE_MS_PER_SEC, FAST_POKE_KB, SLOW_POKE_KB);
+    println!("CONTROL slow trigger={} ms/s; fast={} KiB/s; slow={} KiB/s; recovery latency<{} ms",
+        latency_control::SLOW_SLOPE_MS_PER_SEC, FAST_POKE_KB, SLOW_POKE_KB, latency_control::RECOVERY_LATENCY_MS);
     let preflight = preflight::run()?;
     let nvme_names = topology::discover(&preflight.destination)?;
     println!("MONITORING  {}", nvme_names.join(", "));

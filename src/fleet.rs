@@ -41,12 +41,12 @@ mod tests {
         let mut fleet = Fleet::new(&["a".into(), "b".into()]);
         for tick in 0..25 {
             let t = tick as f64 * 0.1;
-            fleet.sample(t, &[drive("a", Some(0.2)), drive("b", Some(10.0 + 20.0*t))]);
+            fleet.sample(t, &[drive("a", Some(0.2)), drive("b", Some(1000.0 + 20.0*t))]);
         }
         let result = fleet.sample(3.0, &[drive("a", Some(0.2))]);
         assert!(!result.fast);
         assert_eq!(result.canary, "b");
-        assert!(fleet.sample(3.1, &[drive("a", Some(0.2)), drive("b", Some(0.5))]).fast);
+        assert!(fleet.sample(3.1, &[drive("a", Some(0.2)), drive("b", Some(999.0))]).fast);
     }
     #[test]
     fn different_baselines_do_not_create_trends() {

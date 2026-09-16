@@ -3,6 +3,7 @@ use crate::algs::RunningAverage;
 const SMOOTHING_SAMPLES: usize = 10;
 // Low validation threshold: exercise SLOW before a severe latency spike.
 pub const SLOW_SLOPE_MS_PER_SEC: f64 = 10.0;
+pub const RECOVERY_LATENCY_MS: f64 = 1000.0;
 
 /// Rusty's latched bandwidth decision. Time is monotonic elapsed seconds.
 pub struct LatencyControl {
@@ -35,7 +36,7 @@ impl LatencyControl {
             self.reset_trend();
             return (self.fast, None);
         };
-        if !self.fast && latency < 1.0 {
+        if !self.fast && latency < RECOVERY_LATENCY_MS {
             self.fast = true;
             self.reset_trend();
         }
@@ -65,7 +66,7 @@ mod tests {
         let mut rusty = LatencyControl::new();
         for tick in 0..20 {
             let t = tick as f64 * 0.125;
-            rusty.sample(t, Some(10.0 + rate * t));
+            rusty.sample(t, Some(1000.0 + rate * t));
         }
         rusty
     }
@@ -81,8 +82,8 @@ mod tests {
     fn missing_samples_hold_congestion_and_recovery_is_strict() {
         let mut rusty = ramp(1200.0);
         assert_eq!(rusty.sample(3.0, None), (false, None));
-        assert_eq!(rusty.sample(3.1, Some(1.0)), (false, None));
-        assert_eq!(rusty.sample(3.2, Some(0.9)), (true, None));
+        assert_eq!(rusty.sample(3.1, Some(1000.0)), (false, None));
+        assert_eq!(rusty.sample(3.2, Some(999.0)), (true, None));
         assert_eq!(rusty.sample(3.3, None), (true, None));
     }
 
