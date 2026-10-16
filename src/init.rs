@@ -1,4 +1,4 @@
-pub const LOADLEVEL_VERSION: &str = "0.2.2";
+pub const LOADLEVEL_VERSION: &str = "1.0 beta";
 
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())

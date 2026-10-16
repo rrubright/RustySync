@@ -1,9 +1,8 @@
 use crate::algs::RunningAverage;
 
 const SMOOTHING_SAMPLES: usize = 10;
-// Low validation threshold: exercise SLOW before a severe latency spike.
-pub const SLOW_SLOPE_MS_PER_SEC: f64 = 10.0;
-pub const RECOVERY_LATENCY_MS: f64 = 1000.0;
+pub const SLOW_LATENCY_MS: f64 = 10.0;
+pub const EMERGENCY_LATENCY_MS: f64 = 1000.0;
 
 /// Rusty's latched bandwidth decision. Time is monotonic elapsed seconds.
 pub struct LatencyControl {
@@ -11,6 +10,7 @@ pub struct LatencyControl {
     average: RunningAverage,
     samples: usize,
     previous: Option<(f64, f64)>,
+    pub rolling_latency_ms: Option<f64>,
 }
 
 impl LatencyControl {
@@ -20,6 +20,7 @@ impl LatencyControl {
             average: RunningAverage::new(SMOOTHING_SAMPLES),
             samples: 0,
             previous: None,
+            rolling_latency_ms: None,
         }
     }
 
@@ -27,6 +28,7 @@ impl LatencyControl {
         self.average.clear();
         self.samples = 0;
         self.previous = None;
+        self.rolling_latency_ms = None;
     }
 
     pub fn sample(&mut self, seconds: f64, latency: Option<f64>) -> (bool, Option<f64>) {
@@ -36,11 +38,12 @@ impl LatencyControl {
             self.reset_trend();
             return (self.fast, None);
         };
-        if !self.fast && latency < RECOVERY_LATENCY_MS {
-            self.fast = true;
-            self.reset_trend();
-        }
         let smoothed = self.average.push(latency);
+        self.rolling_latency_ms = Some(smoothed);
+        // Both limits apply immediately, even with a partial window and no slope.
+        // Recovery uses the same rolling window so one low reading cannot clear
+        // accumulated latency. Missing data preserves the latched state above.
+        self.fast = latency < EMERGENCY_LATENCY_MS && smoothed < SLOW_LATENCY_MS;
         self.samples = (self.samples + 1).min(SMOOTHING_SAMPLES);
         if self.samples < SMOOTHING_SAMPLES {
             return (self.fast, None);
@@ -51,9 +54,7 @@ impl LatencyControl {
             (seconds > time).then(|| (smoothed - value) / (seconds - time))
         });
         self.previous = Some((seconds, smoothed));
-        if self.fast && slope.is_some_and(|v| v >= SLOW_SLOPE_MS_PER_SEC) {
-            self.fast = false;
-        }
+        // Slope remains an early-warning diagnostic, never a trigger gate.
         (self.fast, slope)
     }
 }
@@ -62,39 +63,69 @@ impl LatencyControl {
 mod tests {
     use super::*;
 
-    fn ramp(rate: f64) -> LatencyControl {
-        let mut rusty = LatencyControl::new();
-        for tick in 0..20 {
-            let t = tick as f64 * 0.125;
-            rusty.sample(t, Some(1000.0 + rate * t));
+    #[test]
+    fn average_threshold_is_immediate_including_partial_windows() {
+        let mut control = LatencyControl::new();
+        assert!(control.sample(0.0, Some(9.0)).0);
+        assert_eq!(control.sample(0.1, Some(11.0)), (false, None));
+        assert_eq!(control.rolling_latency_ms, Some(10.0));
+        let mut fresh = LatencyControl::new();
+        assert_eq!(fresh.sample(0.0, Some(10.0)), (false, None));
+    }
+
+    #[test]
+    fn flat_and_falling_averages_still_force_slow() {
+        for rate in [0.0, -1.0] {
+            let mut control = LatencyControl::new();
+            for tick in 0..20 {
+                assert!(!control.sample(tick as f64, Some(30.0 + rate * tick as f64)).0);
+            }
+            assert!(control.sample(20.0, Some(30.0 + rate * 20.0)).1.unwrap() <= 0.0);
         }
-        rusty
     }
 
     #[test]
-    fn validation_threshold_is_ten_ms_per_second() {
-        assert!(ramp(9.0).fast);
-        assert!(!ramp(10.0).fast);
-        assert!(!ramp(12.0).fast);
-    }
-
-    #[test]
-    fn missing_samples_hold_congestion_and_recovery_is_strict() {
-        let mut rusty = ramp(1200.0);
-        assert_eq!(rusty.sample(3.0, None), (false, None));
-        assert_eq!(rusty.sample(3.1, Some(1000.0)), (false, None));
-        assert_eq!(rusty.sample(3.2, Some(999.0)), (true, None));
-        assert_eq!(rusty.sample(3.3, None), (true, None));
-    }
-
-    #[test]
-    fn noise_and_missing_data_do_not_invent_a_rise() {
-        let mut rusty = LatencyControl::new();
-        for tick in 0..30 {
-            let latency = if tick % 2 == 0 { 10.0 } else { 12.0 };
-            assert!(rusty.sample(tick as f64 * 0.1, Some(latency)).0);
+    fn emergency_is_immediate_without_slope_or_consecutive_samples() {
+        let mut control = LatencyControl::new();
+        for tick in 0..10 {
+            assert!(control.sample(tick as f64, Some(0.0)).0);
         }
-        assert_eq!(rusty.sample(3.0, None), (true, None));
-        assert_eq!(rusty.sample(3.1, Some(5000.0)), (true, None));
+        // Repeated time deliberately makes slope unavailable.
+        assert_eq!(control.sample(9.0, Some(1000.0)), (false, None));
+        assert!(!control.sample(10.0, Some(0.0)).0);
+        for tick in 11..20 { control.sample(tick as f64, Some(0.0)); }
+        assert!(control.fast);
+    }
+
+    #[test]
+    fn emergency_is_independent_of_average_window_size() {
+        let mut control = LatencyControl::new();
+        // Exercise the emergency guard independently, even if smoothing is
+        // lengthened enough in the future to dilute a single emergency sample.
+        control.average = RunningAverage::new(1000);
+        for tick in 0..1000 { control.sample(tick as f64, Some(0.0)); }
+        assert!(!control.sample(999.0, Some(1000.0)).0);
+        assert_eq!(control.rolling_latency_ms, Some(1.0));
+    }
+
+    #[test]
+    fn missing_or_invalid_latency_preserves_slow_and_resets_trend() {
+        for invalid in [None, Some(f64::NAN), Some(f64::INFINITY), Some(-1.0)] {
+            let mut control = LatencyControl::new();
+            assert!(!control.sample(0.0, Some(1000.0)).0);
+            assert_eq!(control.sample(1.0, invalid), (false, None));
+            assert_eq!(control.rolling_latency_ms, None);
+            assert!(!control.sample(2.0, Some(10.0)).0);
+            assert!(control.sample(3.0, Some(0.0)).0);
+        }
+    }
+
+    #[test]
+    fn slope_warns_below_threshold_without_forcing_slow() {
+        let mut control = LatencyControl::new();
+        for tick in 0..10 { assert!(control.sample(tick as f64 * 0.01, Some(0.0)).0); }
+        let (fast, slope) = control.sample(0.1, Some(9.0));
+        assert!(fast);
+        assert!(slope.unwrap() > 10.0);
     }
 }

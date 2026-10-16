@@ -1,7 +1,8 @@
 # RustySync
 
 Rusty wraps rsync and reduces its bandwidth when storage write latency rises.
-The source and destination entered at startup are used for the actual transfer.
+The source, destination, and FAST bandwidth entered at startup are used for the
+actual transfer. Rusty remembers all three for the next run.
 
 ## Monitoring
 
@@ -14,9 +15,12 @@ Each drive has its own ten-sample, in-memory latency window. Any drive's slow st
 reduces the entire stream. Every drive that triggered slowing must recover before
 FAST resumes; missing or idle samples do not count as recovery. The canary is the
 highest-latency drive among latched slow drives, or among all drives when none is slow.
-The slope threshold remains 10 ms/s. A valid latency reading below 1000 ms clears
-a drive’s slow latch.
-FAST remains 40,000 KiB/s and SLOW remains 1,000 KiB/s.
+The primary SLOW trigger is ten consecutive valid latency readings at or above
+1000 ms, even when latency is flat or falling. The existing smoothed-latency slope
+trigger at or above 10 ms/s remains an independent secondary safeguard. A valid
+latency reading below 700 ms clears a drive’s slow latch.
+FAST is selected during preflight and defaults to 55,000 KiB/s. SLOW remains
+1,000 KiB/s.
 
 Console status appears every five seconds. Canary and rate changes appear immediately.
 Speed is a rolling rsync progress estimate in MiB/s, not a physical-device write rate.

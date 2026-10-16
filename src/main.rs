@@ -1,6 +1,9 @@
 mod algs;
 mod assessment;
+mod fleet;
 mod init;
+mod latency_control;
+mod latency_history;
 mod launch;
 mod log;
 mod nvme;
@@ -8,10 +11,8 @@ mod observe;
 mod phase;
 mod preflight;
 mod probe;
-mod latency_control;
-mod topology;
-mod fleet;
 mod state;
+mod topology;
 mod types;
 
 use crate::phase::Phase;
@@ -22,21 +23,27 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const SLOW_POKE_KB: u64 = 1000;
-const FAST_POKE_KB: u64 = 40_000;
+const BWLIMIT_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 
-// Rusty slows on the slope of smoothed latency and recovers on a valid
-// reading below 1000 ms. Missing latency never clears the SLOW state.
+// The worst per-drive rolling average controls bandwidth; slope is diagnostic.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RustySync {}", init::LOADLEVEL_VERSION);
-    println!("CONTROL slow trigger={} ms/s; fast={} KiB/s; slow={} KiB/s; recovery latency<{} ms",
-        latency_control::SLOW_SLOPE_MS_PER_SEC, FAST_POKE_KB, SLOW_POKE_KB, latency_control::RECOVERY_LATENCY_MS);
     let preflight = preflight::run()?;
+    println!(
+        "CONTROL slow trigger=any drive rolling average>={} ms OR raw latency>={} ms; fast={} KiB/s; slow={} KiB/s; recovery average<{} ms; slope diagnostic only",
+        latency_control::SLOW_LATENCY_MS,
+        latency_control::EMERGENCY_LATENCY_MS,
+        preflight.fast_poke_kb,
+        SLOW_POKE_KB,
+        latency_control::SLOW_LATENCY_MS
+    );
     let nvme_names = topology::discover(&preflight.destination)?;
     println!("MONITORING  {}", nvme_names.join(", "));
     println!("SOURCE      {}", preflight.source);
     println!("DESTINATION {}", preflight.destination);
     let mut controls = fleet::Fleet::new(&nvme_names);
+    let mut latency_history = latency_history::LatencyHistory::default();
     let mut canary_name = nvme_names[0].clone();
 
     let drives = nvme_names
@@ -108,9 +115,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut assessment = assessment::Assessment::new();
 
     // Use the selected destination for both monitoring and the transfer.
+    let initial_bwlimit = format!("--bwlimit={}", preflight.fast_poke_kb);
     let mut child = launch::launch(&[
         "-aHX",
-        "--bwlimit=40000",
+        initial_bwlimit.as_str(),
         "--numeric-ids",
         "--info=progress2",
         "--partial",
@@ -122,19 +130,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         preflight.source.as_str(),
         preflight.destination.as_str(),
     ])?;
-    // Match the invocation's 40,000 limit initially. Subsequent pokes happen
-    // only when the FAST/SLOW state changes; there is no periodic reassertion.
+    // Match the configured invocation limit initially. A periodic same-value
+    // poke keeps sudo authorization warm between FAST/SLOW transitions.
 
-    launch::poke_bwlimit(&child, FAST_POKE_KB)?;
-    log::report_poke("POKE INITIAL", &canary_name, true, FAST_POKE_KB, None, None, None);
+    launch::poke_bwlimit(&child, preflight.fast_poke_kb)?;
+    log::report_poke(&canary_name, true, None, None, None);
     let sample_clock = Instant::now();
     let mut fast = true;
+    let mut last_bwlimit_poke = Instant::now();
     let mut progress_rate = algs::ProgressRate::new();
     let mut last_summary = Instant::now();
     let csv_path = std::env::var("RUSTYSYNC_CSV").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().as_secs();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         format!("{home}/.local/state/rustysync/characterization-{stamp}.csv")
     });
 
@@ -146,7 +157,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut new = observe::observe(&state.config, &state.capabilities);
 
                 for new_drive in &mut new.drives {
-                    if let Some(old_drive) = old.drives.iter().find(|d| d.id.name == new_drive.id.name) {
+                    if let Some(old_drive) =
+                        old.drives.iter().find(|d| d.id.name == new_drive.id.name)
+                    {
                         new_drive.write_latency_ms = algs::drive_latency_ms(old_drive, new_drive);
                         new_drive.bytes_written = algs::drive_bytes_written(old_drive, new_drive);
                     }
@@ -157,31 +170,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let want_fast = decision.fast;
                 let latency = decision.latency;
                 let slope = decision.slope;
-                if decision.canary != canary_name {
-                    canary_name = decision.canary;
-                    log::report_poke("CANARY", &canary_name, fast,
-                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB },
-                        slope, latency, new.rsync_velocity_mb_s);
-                }
+                let canary_changed = decision.canary != canary_name;
+                canary_name = decision.canary;
+                let mode_changed = want_fast != fast;
                 if want_fast != fast {
-                    launch::poke_bwlimit(&child, if want_fast { FAST_POKE_KB } else { SLOW_POKE_KB })?;
+                    launch::poke_bwlimit(
+                        &child,
+                        if want_fast {
+                            preflight.fast_poke_kb
+                        } else {
+                            SLOW_POKE_KB
+                        },
+                    )?;
                     fast = want_fast;
-                    log::report_poke("POKE CHANGE", &canary_name, fast,
-                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB }, slope, latency, new.rsync_velocity_mb_s);
-                    last_summary = Instant::now();
+                    last_bwlimit_poke = Instant::now();
+                }
+
+                if last_bwlimit_poke.elapsed() >= BWLIMIT_WATCHDOG_INTERVAL {
+                    launch::poke_bwlimit(
+                        &child,
+                        if fast {
+                            preflight.fast_poke_kb
+                        } else {
+                            SLOW_POKE_KB
+                        },
+                    )?;
+                    last_bwlimit_poke = Instant::now();
                 }
 
                 // Show live status even when optional CSV logging is disabled.
-                if last_summary.elapsed() >= Duration::from_secs(5) {
-                    log::report_poke("STATUS", &canary_name, fast,
-                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB },
-                        slope, latency, new.rsync_velocity_mb_s);
+                if mode_changed || canary_changed || last_summary.elapsed() >= Duration::from_secs(5) {
+                    log::report_poke(
+                        &canary_name,
+                        fast,
+                        slope,
+                        latency,
+                        new.rsync_velocity_mb_s,
+                    );
                     last_summary = Instant::now();
                 }
 
                 if preflight.debug_log {
-                    log::append_observation(&csv_path, &new, fast,
-                        if fast { FAST_POKE_KB } else { SLOW_POKE_KB }, slope)?;
+                    let slopes_30s = latency_history.sample(seconds, &new.drives);
+                    log::append_observation(
+                        &csv_path,
+                        &new,
+                        fast,
+                        if fast {
+                            preflight.fast_poke_kb
+                        } else {
+                            SLOW_POKE_KB
+                        },
+                        slope,
+                        &slopes_30s,
+                    )?;
                 }
 
                 old = new;

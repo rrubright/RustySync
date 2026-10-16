@@ -17,7 +17,7 @@ impl Fleet {
             let latency = drives.iter().find(|d| &d.id.name == name)
                 .and_then(|d| d.write_latency_ms).filter(|v| v.is_finite() && *v >= 0.0);
             let (fast, slope) = control.sample(seconds, latency);
-            rows.push((name.clone(), fast, latency, slope));
+            rows.push((name.clone(), fast, control.rolling_latency_ms, slope));
         }
         let fast = rows.iter().all(|r| r.1);
         // A latched slow drive takes precedence; missing samples cannot recover it.
@@ -46,7 +46,8 @@ mod tests {
         let result = fleet.sample(3.0, &[drive("a", Some(0.2))]);
         assert!(!result.fast);
         assert_eq!(result.canary, "b");
-        assert!(fleet.sample(3.1, &[drive("a", Some(0.2)), drive("b", Some(999.0))]).fast);
+        assert!(!fleet.sample(3.1, &[drive("a", Some(0.2)), drive("b", Some(999.0))]).fast);
+        assert!(!fleet.sample(3.2, &[drive("a", Some(0.2)), drive("b", Some(0.0))]).fast);
     }
     #[test]
     fn different_baselines_do_not_create_trends() {
@@ -54,9 +55,32 @@ mod tests {
         for tick in 0..30 {
             // Reordered samples still match the correct drive history.
             let result = fleet.sample(tick as f64 * 0.1,
-                &[drive("b", Some(100.0)), drive("a", Some(0.2))]);
+                &[drive("b", Some(9.0)), drive("a", Some(0.2))]);
             assert!(result.fast);
             assert_eq!(result.canary, "b");
         }
     }
+    #[test]
+    fn worst_average_controls_even_when_another_drive_has_higher_raw_latency() {
+        let mut fleet = Fleet::new(&["a".into(), "b".into()]);
+        for tick in 0..10 {
+            fleet.sample(tick as f64, &[drive("a", Some(12.0)), drive("b", Some(0.0))]);
+        }
+        let result = fleet.sample(10.0, &[drive("b", Some(20.0)), drive("a", Some(0.0))]);
+        assert!(!result.fast);
+        assert_eq!(result.canary, "a");
+        assert_eq!(result.latency, Some(10.8));
+    }
+
+    #[test]
+    fn non_canary_emergency_and_average_override_healthy_drives() {
+        for latency in [10.0, 1000.0] {
+            let mut fleet = Fleet::new(&["a".into(), "b".into(), "c".into()]);
+            let result = fleet.sample(0.0, &[
+                drive("c", Some(latency)), drive("b", Some(0.0)), drive("a", Some(0.0))]);
+            assert!(!result.fast);
+            assert_eq!(result.canary, "c");
+        }
+    }
+
 }

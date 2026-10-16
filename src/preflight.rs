@@ -2,10 +2,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_FAST_POKE_KB: u64 = 55_000;
+
 #[derive(Debug, Clone)]
 pub struct PreflightResult {
     pub source: String,
     pub destination: String,
+    pub fast_poke_kb: u64,
     pub debug_log: bool,
 }
 
@@ -14,9 +17,13 @@ pub fn run() -> Result<PreflightResult, Box<dyn std::error::Error>> {
 
     let source_default = remembered.as_ref().map(|r| r.source.as_str());
     let destination_default = remembered.as_ref().map(|r| r.destination.as_str());
+    let fast_poke_default = remembered
+        .as_ref()
+        .map_or(DEFAULT_FAST_POKE_KB, |r| r.fast_poke_kb);
 
     let source = prompt_with_default("Source", source_default)?;
     let destination = prompt_with_default("Destination", destination_default)?;
+    let fast_poke_kb = prompt_positive_u64("Fast bandwidth KiB/s", fast_poke_default)?;
     let debug_log = prompt_yes_no("Enable CSV debug logging?")?;
 
     validate_source(&source)?;
@@ -24,6 +31,7 @@ pub fn run() -> Result<PreflightResult, Box<dyn std::error::Error>> {
     let result = PreflightResult {
         source,
         destination,
+        fast_poke_kb,
         debug_log,
     };
 
@@ -83,6 +91,26 @@ fn prompt_yes_no(label: &str) -> Result<bool, io::Error> {
     ))
 }
 
+fn prompt_positive_u64(label: &str, default: u64) -> Result<u64, io::Error> {
+    loop {
+        print!("{label} [{default}]: ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if input.is_empty() {
+            return Ok(default);
+        }
+
+        match input.parse::<u64>() {
+            Ok(value) if value > 0 => return Ok(value),
+            _ => eprintln!("Enter a positive whole number of KiB/s."),
+        }
+    }
+}
+
 fn validate_source(source: &str) -> Result<(), Box<dyn std::error::Error>> {
     if source.trim().is_empty() {
         return Err("source cannot be empty".into());
@@ -126,18 +154,22 @@ fn load_last_run() -> Option<PreflightResult> {
 
     let mut source = None;
     let mut destination = None;
+    let mut fast_poke_kb = None;
 
     for line in contents.lines() {
         if let Some(value) = line.strip_prefix("source=") {
             source = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("destination=") {
             destination = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("fast_poke_kb=") {
+            fast_poke_kb = value.parse::<u64>().ok().filter(|value| *value > 0);
         }
     }
 
     Some(PreflightResult {
         source: source?,
         destination: destination?,
+        fast_poke_kb: fast_poke_kb.unwrap_or(DEFAULT_FAST_POKE_KB),
         debug_log: false,
     })
 }
@@ -150,8 +182,8 @@ fn save_last_run(result: &PreflightResult) -> Result<(), Box<dyn std::error::Err
     }
 
     let contents = format!(
-        "source={}\ndestination={}\n",
-        result.source, result.destination
+        "source={}\ndestination={}\nfast_poke_kb={}\n",
+        result.source, result.destination, result.fast_poke_kb
     );
 
     fs::write(path, contents)?;

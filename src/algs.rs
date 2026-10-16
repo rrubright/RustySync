@@ -46,12 +46,6 @@ pub fn write_latency_ms(old: &DiskStats, new: &DiskStats) -> Option<f64> {
     let new_writes = *new.fields.get(4)?;
     let new_time_ms = *new.fields.get(7)?;
 
-    /*
-    println!(
-        "DEBUG old: writes={} time={}  new: writes={} time={}",
-        old_writes, old_time_ms, new_writes, new_time_ms
-    );
-    */
     // A reset/decrease or an interval without completed writes has no usable
     // latency delta; None is not evidence of zero latency.
     let writes_delta = new_writes.checked_sub(old_writes)?;
@@ -61,12 +55,6 @@ pub fn write_latency_ms(old: &DiskStats, new: &DiskStats) -> Option<f64> {
         return None;
     }
 
-    /*
-    println!(
-        "DEBUG writes_delta={} time_delta={}ms",
-        writes_delta, time_delta
-    );
-    */
 
     Some(time_delta as f64 / writes_delta as f64)
 }
@@ -91,18 +79,10 @@ pub fn drive_bytes_written(
     // Linux diskstats sectors are traditionally 512 bytes.
     sectors_written.checked_mul(512)
 }
-pub fn evaluate(old: &Observation, new: &Observation) -> Decision {
+pub fn evaluate(_old: &Observation, new: &Observation) -> Decision {
     let mut severity = Severity::Ignore;
     let mut messages = Vec::new();
 
-    for (old_drive, new_drive) in old.drives.iter().zip(new.drives.iter()) {
-        let latency = drive_latency_ms(old_drive, new_drive);
-
-        match latency {
-            Some(ms) => println!("{} latency = {:.3} ms/write", new_drive.id.name, ms),
-            None => println!("{} latency = idle/no writes", new_drive.id.name),
-        }
-    }
     for flag in &new.missing_flags {
         let (level, text) = classify(flag);
 
